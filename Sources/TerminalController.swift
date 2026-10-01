@@ -1825,6 +1825,9 @@ class TerminalController {
         case "report_shell_state":
             return reportShellState(args)
 
+        case "report_command":
+            return reportCommand(args)
+
         case "report_pr_action":
             return reportPullRequestAction(args)
 
@@ -11426,6 +11429,7 @@ class TerminalController {
           report_tty <tty_name> [--tab=X] [--panel=Y] - Register TTY for batched port scanning
           ports_kick [--tab=X] [--panel=Y] [--reason=command|refresh] - Request batched port scan for panel
           report_shell_state <prompt|running> [--tab=X] [--panel=Y] - Report whether the shell is idle at a prompt or running a command
+          report_command [--tab=X] [--panel=Y] -- <command> - Report the command that just started in a shell
           report_pr_action <merge|close|reopen|create|checkout|ready|edit|view> [--target=X] [--tab=X] [--panel=Y] - Hint that a PR-affecting command completed in the panel
           report_pwd <path> [--tab=X] [--panel=Y] - Report current working directory
           clear_ports [--tab=X] [--panel=Y] - Clear listening ports
@@ -15296,6 +15300,62 @@ class TerminalController {
             }
 
             tabManager.updateSurfaceDirectory(tabId: tab.id, surfaceId: surfaceId, directory: directory)
+        }
+        return result
+    }
+
+    private func reportCommand(_ args: String) -> String {
+        let parts = splitMetadataBlockArgs(args)
+        let parsed = parseOptionsNoStop(parts.optionsPart)
+        let command = parts.markdownPart ?? parsed.positional.joined(separator: " ")
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCommand.isEmpty else {
+            return "ERROR: Missing command — usage: report_command [--tab=X] [--panel=Y] -- <command>"
+        }
+
+        if let scope = Self.explicitSocketScope(options: parsed.options) {
+            DispatchQueue.main.async {
+                guard let tabManager = AppDelegate.shared?.tabManagerFor(tabId: scope.workspaceId) else { return }
+                tabManager.updateSurfaceCommand(
+                    tabId: scope.workspaceId,
+                    surfaceId: scope.panelId,
+                    command: trimmedCommand
+                )
+            }
+            return "OK"
+        }
+
+        guard let tabManager else { return "ERROR: TabManager not available" }
+
+        var result = "OK"
+        DispatchQueue.main.sync {
+            guard let tab = resolveTabForReport(parts.optionsPart) else {
+                result = parsed.options["tab"] != nil ? "ERROR: Tab not found" : "ERROR: No tab selected"
+                return
+            }
+
+            let validSurfaceIds = Set(tab.panels.keys)
+            let surfaceId: UUID
+            if let panelArg = parsed.options["panel"], !panelArg.isEmpty {
+                guard let parsedId = UUID(uuidString: panelArg) else {
+                    result = "ERROR: Invalid panel id '\(panelArg)'"
+                    return
+                }
+                surfaceId = parsedId
+            } else {
+                guard let focused = tab.focusedPanelId else {
+                    result = "ERROR: Missing panel id (no focused surface)"
+                    return
+                }
+                surfaceId = focused
+            }
+
+            guard validSurfaceIds.contains(surfaceId) else {
+                result = "ERROR: Panel not found '\(surfaceId.uuidString)'"
+                return
+            }
+
+            tabManager.updateSurfaceCommand(tabId: tab.id, surfaceId: surfaceId, command: trimmedCommand)
         }
         return result
     }

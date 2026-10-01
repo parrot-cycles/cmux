@@ -12,6 +12,68 @@ final class SessionPersistenceTests: XCTestCase {
         let display: SessionDisplaySnapshot?
     }
 
+    func testAgentSessionInfoDetectsCodexResumeCommand() throws {
+        let session = try XCTUnwrap(AgentSessionInfo.detected(
+            command: "AWS_PROFILE=dev codex resume 019eac5e-1498-7ec0-98aa-a76ff3102937",
+            title: nil,
+            scrollback: nil,
+            workingDirectory: "/tmp/project"
+        ))
+
+        XCTAssertEqual(session.kind, .codex)
+        XCTAssertEqual(session.sessionId, "019eac5e-1498-7ec0-98aa-a76ff3102937")
+        XCTAssertEqual(session.restoreCommand, "codex resume '019eac5e-1498-7ec0-98aa-a76ff3102937'")
+    }
+
+    func testAgentSessionInfoDetectsClaudeResumeCommand() throws {
+        let session = try XCTUnwrap(AgentSessionInfo.detected(
+            command: "claude --resume fff0cbd1-d86e-41c9-aa43-2242cdbcd144",
+            title: "Claude Code",
+            scrollback: nil,
+            workingDirectory: "/tmp/workspace"
+        ))
+
+        XCTAssertEqual(session.kind, .claude)
+        XCTAssertEqual(session.sessionId, "fff0cbd1-d86e-41c9-aa43-2242cdbcd144")
+        XCTAssertEqual(session.restoreCommand, "claude --resume 'fff0cbd1-d86e-41c9-aa43-2242cdbcd144'")
+    }
+
+    @MainActor
+    func testWorkspaceSessionSnapshotRestoresCodexResumeCommand() throws {
+        let defaults = UserDefaults.standard
+        let original = defaults.object(forKey: AgentSessionRestoreSettings.autoRestoreKey)
+        defer {
+            if let original {
+                defaults.set(original, forKey: AgentSessionRestoreSettings.autoRestoreKey)
+            } else {
+                defaults.removeObject(forKey: AgentSessionRestoreSettings.autoRestoreKey)
+            }
+        }
+        defaults.set(true, forKey: AgentSessionRestoreSettings.autoRestoreKey)
+
+        let workspace = Workspace()
+        let panelId = try XCTUnwrap(workspace.focusedPanelId)
+        workspace.updatePanelCommand(
+            panelId: panelId,
+            command: "codex resume 019eac5e-1498-7ec0-98aa-a76ff3102937"
+        )
+
+        let snapshot = workspace.sessionSnapshot(includeScrollback: false)
+        let panelSnapshot = try XCTUnwrap(snapshot.panels.first { $0.id == panelId })
+        XCTAssertEqual(panelSnapshot.terminal?.agentSession?.kind, .codex)
+        XCTAssertEqual(panelSnapshot.terminal?.agentSession?.sessionId, "019eac5e-1498-7ec0-98aa-a76ff3102937")
+
+        let restored = Workspace()
+        restored.restoreSessionSnapshot(snapshot)
+
+        let restoredPanelId = try XCTUnwrap(restored.focusedPanelId)
+        let restoredPanel = try XCTUnwrap(restored.terminalPanel(for: restoredPanelId))
+        XCTAssertEqual(
+            restoredPanel.surface.requestedInitialCommand,
+            "codex resume '019eac5e-1498-7ec0-98aa-a76ff3102937'"
+        )
+    }
+
     @MainActor
     func testWorkspaceSessionSnapshotRestoresMarkdownPanel() throws {
         let root = FileManager.default.temporaryDirectory

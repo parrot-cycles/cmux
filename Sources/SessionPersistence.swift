@@ -223,6 +223,9 @@ struct SessionGitBranchSnapshot: Codable, Sendable {
 
 struct SessionTerminalPanelSnapshot: Codable, Sendable {
     var workingDirectory: String?
+    var startupCommand: String?
+    var lastCommand: String?
+    var agentSession: AgentSessionInfo?
     var scrollback: String?
 }
 

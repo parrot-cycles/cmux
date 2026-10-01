@@ -470,6 +470,15 @@ extension Workspace {
             )
             terminalSnapshot = SessionTerminalPanelSnapshot(
                 workingDirectory: panelDirectories[panelId],
+                startupCommand: terminalPanel.surface.requestedInitialCommand,
+                lastCommand: panelLastCommands[panelId],
+                agentSession: AgentSessionInfo.detected(
+                    command: panelLastCommands[panelId] ?? terminalPanel.surface.requestedInitialCommand,
+                    title: panelTitles[panelId],
+                    scrollback: resolvedScrollback,
+                    workingDirectory: panelDirectories[panelId],
+                    existing: panelAgentSessions[panelId]
+                ),
                 scrollback: resolvedScrollback
             )
             browserSnapshot = nil
@@ -642,16 +651,33 @@ extension Workspace {
         switch snapshot.type {
         case .terminal:
             let workingDirectory = snapshot.terminal?.workingDirectory ?? snapshot.directory ?? currentDirectory
-            let replayEnvironment = SessionScrollbackReplayStore.replayEnvironment(
-                for: snapshot.terminal?.scrollback
-            )
+            let restoreCommand = AgentSessionRestoreSettings.isAutoRestoreEnabled()
+                ? snapshot.terminal?.agentSession?.restoreCommand
+                : nil
+            let replayEnvironment = restoreCommand == nil
+                ? SessionScrollbackReplayStore.replayEnvironment(for: snapshot.terminal?.scrollback)
+                : [:]
             guard let terminalPanel = newTerminalSurface(
                 inPane: paneId,
                 focus: false,
                 workingDirectory: workingDirectory,
+                startupCommand: restoreCommand,
                 startupEnvironment: replayEnvironment
             ) else {
                 return nil
+            }
+            panelLastCommands[terminalPanel.id] = snapshot.terminal?.lastCommand
+                ?? snapshot.terminal?.startupCommand
+                ?? restoreCommand
+            if let agentSession = AgentSessionInfo.detected(
+                command: panelLastCommands[terminalPanel.id],
+                title: snapshot.title,
+                scrollback: snapshot.terminal?.scrollback,
+                workingDirectory: workingDirectory,
+                existing: snapshot.terminal?.agentSession
+            ) {
+                panelAgentSessions[terminalPanel.id] = agentSession
+                syncAgentSessionIcon(panelId: terminalPanel.id)
             }
             let fallbackScrollback = SessionPersistencePolicy.truncatedScrollback(snapshot.terminal?.scrollback)
             if let fallbackScrollback {
@@ -6616,6 +6642,8 @@ final class Workspace: Identifiable, ObservableObject {
     }()
     nonisolated(unsafe) static var runSSHControlMasterCommandOverrideForTesting: (([String]) -> Void)?
     private var panelShellActivityStates: [UUID: PanelShellActivityState] = [:]
+    private var panelLastCommands: [UUID: String] = [:]
+    private var panelAgentSessions: [UUID: AgentSessionInfo] = [:]
     /// PIDs associated with agent status entries (e.g. claude_code), keyed by status key.
     /// Used for stale-session detection: if the PID is dead, the status entry is cleared.
     var agentPIDs: [String: pid_t] = [:]
@@ -7261,6 +7289,9 @@ final class Workspace: Identifiable, ObservableObject {
     private func surfaceKind(for panel: any Panel) -> String {
         switch panel.panelType {
         case .terminal:
+            if let agentSession = panelAgentSessions[panel.id] {
+                return agentSession.kind.rawValue
+            }
             return SurfaceKind.terminal
         case .browser:
             return SurfaceKind.browser
@@ -7608,6 +7639,39 @@ final class Workspace: Identifiable, ObservableObject {
 #endif
     }
 
+    func updatePanelCommand(panelId: UUID, command: String) {
+        guard panels[panelId] != nil else { return }
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        panelLastCommands[panelId] = trimmed
+        updatePanelAgentSession(panelId: panelId, command: trimmed, title: panelTitles[panelId])
+    }
+
+    private func updatePanelAgentSession(panelId: UUID, command: String?, title: String?) {
+        guard panels[panelId] != nil else { return }
+        guard let agentSession = AgentSessionInfo.detected(
+            command: command,
+            title: title,
+            scrollback: restoredTerminalScrollbackByPanelId[panelId],
+            workingDirectory: panelDirectories[panelId],
+            existing: panelAgentSessions[panelId]
+        ) else { return }
+
+        guard panelAgentSessions[panelId] != agentSession else { return }
+        panelAgentSessions[panelId] = agentSession
+        syncAgentSessionIcon(panelId: panelId)
+    }
+
+    private func syncAgentSessionIcon(panelId: UUID) {
+        guard let tabId = surfaceIdFromPanelId(panelId),
+              let agentSession = panelAgentSessions[panelId] else { return }
+        bonsplitController.updateTab(
+            tabId,
+            icon: .some(agentSession.kind.systemImageName),
+            kind: .some(agentSession.kind.rawValue)
+        )
+    }
+
     func panelNeedsConfirmClose(panelId: UUID, fallbackNeedsConfirmClose: Bool) -> Bool {
         Self.resolveCloseConfirmation(
             shellActivityState: panelShellActivityStates[panelId],
@@ -7763,6 +7827,7 @@ final class Workspace: Identifiable, ObservableObject {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         var didMutate = false
+        updatePanelAgentSession(panelId: panelId, command: panelLastCommands[panelId], title: trimmed)
 
         if panelTitles[panelId] != trimmed {
             panelTitles[panelId] = trimmed
@@ -7808,6 +7873,8 @@ final class Workspace: Identifiable, ObservableObject {
         surfaceTTYNames = surfaceTTYNames.filter { validSurfaceIds.contains($0.key) }
         remoteDetectedSurfaceIds = remoteDetectedSurfaceIds.filter { validSurfaceIds.contains($0) }
         panelShellActivityStates = panelShellActivityStates.filter { validSurfaceIds.contains($0.key) }
+        panelLastCommands = panelLastCommands.filter { validSurfaceIds.contains($0.key) }
+        panelAgentSessions = panelAgentSessions.filter { validSurfaceIds.contains($0.key) }
         panelPullRequests = panelPullRequests.filter { validSurfaceIds.contains($0.key) }
         syncRemotePortScanTTYs()
         recomputeListeningPorts()
@@ -8864,6 +8931,15 @@ final class Workspace: Identifiable, ObservableObject {
         configureTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
+        if let agentSession = AgentSessionInfo.detected(
+            command: remoteTerminalStartupCommand,
+            title: newPanel.displayTitle,
+            scrollback: nil,
+            workingDirectory: splitWorkingDirectory
+        ) {
+            panelLastCommands[newPanel.id] = remoteTerminalStartupCommand
+            panelAgentSessions[newPanel.id] = agentSession
+        }
         if remoteTerminalStartupCommand != nil {
             trackRemoteTerminalSurface(newPanel.id)
         }
@@ -8938,6 +9014,7 @@ final class Workspace: Identifiable, ObservableObject {
         inPane paneId: PaneID,
         focus: Bool? = nil,
         workingDirectory: String? = nil,
+        startupCommand: String? = nil,
         startupEnvironment: [String: String] = [:]
     ) -> TerminalPanel? {
         let shouldFocusNewTab = focus ?? (bonsplitController.focusedPaneId == paneId)
@@ -8946,6 +9023,7 @@ final class Workspace: Identifiable, ObservableObject {
 
         let inheritedConfig = inheritedTerminalConfig(inPane: paneId)
         let remoteTerminalStartupCommand = remoteTerminalStartupCommand()
+        let terminalStartupCommand = startupCommand ?? remoteTerminalStartupCommand
 
         // Create new terminal panel
         let newPanel = TerminalPanel(
@@ -8954,7 +9032,7 @@ final class Workspace: Identifiable, ObservableObject {
             configTemplate: inheritedConfig,
             workingDirectory: workingDirectory,
             portOrdinal: portOrdinal,
-            initialCommand: remoteTerminalStartupCommand,
+            initialCommand: terminalStartupCommand,
             additionalEnvironment: startupEnvironment
         )
         configureTerminalPanel(newPanel)
@@ -8968,14 +9046,16 @@ final class Workspace: Identifiable, ObservableObject {
         // Create tab in bonsplit
         guard let newTabId = bonsplitController.createTab(
             title: newPanel.displayTitle,
-            icon: newPanel.displayIcon,
-            kind: SurfaceKind.terminal,
+            icon: panelAgentSessions[newPanel.id]?.kind.systemImageName ?? newPanel.displayIcon,
+            kind: panelAgentSessions[newPanel.id]?.kind.rawValue ?? SurfaceKind.terminal,
             isDirty: newPanel.isDirty,
             isPinned: false,
             inPane: paneId
         ) else {
             panels.removeValue(forKey: newPanel.id)
             panelTitles.removeValue(forKey: newPanel.id)
+            panelLastCommands.removeValue(forKey: newPanel.id)
+            panelAgentSessions.removeValue(forKey: newPanel.id)
             if remoteTerminalStartupCommand != nil {
                 untrackRemoteTerminalSurface(newPanel.id)
             }
@@ -11757,6 +11837,8 @@ extension Workspace: BonsplitDelegate {
         manualUnreadMarkedAt.removeValue(forKey: panelId)
         panelSubscriptions.removeValue(forKey: panelId)
         panelShellActivityStates.removeValue(forKey: panelId)
+        panelLastCommands.removeValue(forKey: panelId)
+        panelAgentSessions.removeValue(forKey: panelId)
         surfaceTTYNames.removeValue(forKey: panelId)
         syncRemotePortScanTTYs()
         restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)
@@ -11910,6 +11992,8 @@ extension Workspace: BonsplitDelegate {
                 manualUnreadPanelIds.remove(panelId)
                 panelSubscriptions.removeValue(forKey: panelId)
                 panelShellActivityStates.removeValue(forKey: panelId)
+                panelLastCommands.removeValue(forKey: panelId)
+                panelAgentSessions.removeValue(forKey: panelId)
                 surfaceTTYNames.removeValue(forKey: panelId)
                 surfaceListeningPorts.removeValue(forKey: panelId)
                 restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)

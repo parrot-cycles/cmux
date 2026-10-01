@@ -502,6 +502,15 @@ _cmux_report_shell_activity_state() {
     _cmux_send_bg "report_shell_state $state --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
 }
 
+_cmux_report_command_start() {
+    local cmd="$1"
+    [[ -n "$cmd" ]] || return 0
+    [[ -S "$CMUX_SOCKET_PATH" ]] || return 0
+    [[ -n "$CMUX_TAB_ID" ]] || return 0
+    [[ -n "$CMUX_PANEL_ID" ]] || return 0
+    _cmux_send_bg "report_command --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID -- $cmd"
+}
+
 _cmux_ports_kick() {
     local reason="${1:-command}"
     # Lightweight: just tell the app to run a batched scan for this panel.
@@ -1079,6 +1088,7 @@ _cmux_preexec() {
     fi
 
     _CMUX_CMD_START="$(_cmux_now)"
+    _cmux_report_command_start "$cmd"
     _cmux_report_shell_activity_state running
     _cmux_record_pr_command_hint "$cmd"
 

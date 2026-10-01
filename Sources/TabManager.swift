@@ -3695,6 +3695,11 @@ class TabManager: ObservableObject {
         }
     }
 
+    func updateSurfaceCommand(tabId: UUID, surfaceId: UUID, command: String) {
+        guard let tab = tabs.first(where: { $0.id == tabId }) else { return }
+        tab.updatePanelCommand(panelId: surfaceId, command: command)
+    }
+
     func handleWorkspacePullRequestCommandHint(
         tabId: UUID,
         surfaceId: UUID,

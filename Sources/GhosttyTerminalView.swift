@@ -3579,6 +3579,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
     private let initialCommand: String?
     private let initialEnvironmentOverrides: [String: String]
     var requestedWorkingDirectory: String? { workingDirectory }
+    var requestedInitialCommand: String? { initialCommand }
     private var additionalEnvironment: [String: String]
     let hostedView: GhosttySurfaceScrollView
     private let surfaceView: GhosttyNSView
